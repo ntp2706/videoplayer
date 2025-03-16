@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Player</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<style>
+    video {
+    width: 80%;
+    max-width: 800px;
+    margin-top: 20px;
+}
+
+.list-group-item {
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+.list-group-item:hover {
+    background: #ddd;
+}
+
+.drop-zone {
+    border: 2px dashed #007bff;
+    border-radius: 5px;
+    padding: 20px;
+    text-align: center;
+    margin-bottom: 20px;
+    background-color: #f8f9fa;
+}
+
+.drop-zone.active {
+    background-color: #e2f3ff;
+    border-color: #0056b3;
+}
+
+.loading-indicator {
+    display: none;
+    margin-top: 10px;
+    text-align: center;
+}
+
+.loading-indicator .spinner-border {
+    width: 3rem;
+    height: 3rem;
+}
+
+.video-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+}
+
+.video-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.video-path {
+    font-size: 0.8em;
+    color: #6c757d;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+</style>
+<body class="container mt-4">
+
+    <div class="drop-zone mt-3" id="dropZone">
+        <p>Drop video here</p>
+        <input type="file" id="fileInput" accept="video/mp4,video/x-mpegts,video/mp2t,.ts,.mp4" class="form-control w-50 mx-auto">
+    </div>
+
+    <div class="loading-indicator" id="loadingIndicator">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <p class="mt-2">Processing video, please wait...</p>
+    </div>
+
+    <div class="text-center mt-3">
+        <video id="videoPlayer" class="border rounded shadow" controls></video>
+    </div>
+
+    <div class="mt-4">
+        <div class="d-flex justify-content-between align-items-center">
+            <h2 class="text-success">Recent Videos</h2>
+            <div>
+                <button id="clearList" class="btn btn-danger">Clear List</button>
+            </div>
+        </div>
+        <ul id="videoList" class="list-group mt-2"></ul>
+    </div>
+
+<!-- Libraries for TS file processing -->
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</body>
+</html>
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+    const video = document.getElementById("videoPlayer");
+    const fileInput = document.getElementById("fileInput");
+    const videoList = document.getElementById("videoList");
+    const clearListBtn = document.getElementById("clearList");
+    const dropZone = document.getElementById("dropZone");
+    const loadingIndicator = document.getElementById("loadingIndicator");
+    
+    let db;
+    let currentVideoName = null;
+    let hls = null;
+    let tsPlayer = null;
+    let videoCache = {};
+    let videoFiles = {};
+
+    function openDatabase() {
+        const checkRequest = indexedDB.open("VideoProgressDB");
+        
+        checkRequest.onsuccess = function(event) {
+            const currentVersion = event.target.result.version;
+            console.log("Current IndexedDB version:", currentVersion);
+            
+            event.target.result.close();
+            
+            const request = indexedDB.open("VideoProgressDB", currentVersion);
+            
+            request.onupgradeneeded = function(event) {
+                db = event.target.result;
+                
+                if (!db.objectStoreNames.contains("videos")) {
+                    const store = db.createObjectStore("videos", { keyPath: "id" });
+                    store.createIndex("name", "name", { unique: false });
+                    store.createIndex("path", "path", { unique: false });
+                }
+            };
+            
+            request.onsuccess = function(event) {
+                db = event.target.result;
+                console.log("Successfully opened IndexedDB with version:", db.version);
+                loadVideoList();
+            };
+            
+            request.onerror = function(event) {
+                console.error("Error opening IndexedDB:", event.target.error);
+                handleDatabaseError();
+            };
+        };
+        
+        checkRequest.onerror = function(event) {
+            console.error("Error checking IndexedDB version:", event.target.error);
+            handleDatabaseError();
+        };
+    }
+    
+    function handleDatabaseError() {
+        const testRequest = indexedDB.open("VideoProgressDB", 1);
+        
+        testRequest.onupgradeneeded = function(event) {
+            event.target.transaction.abort();
+            event.target.result.close();
+            
+            tryDeleteAndRecreate();
+        };
+        
+        testRequest.onsuccess = function(event) {
+            db = event.target.result;
+            console.log("Successfully opened IndexedDB with version 1");
+            
+            if (!db.objectStoreNames.contains("videos")) {
+                db.close();
+                tryDeleteAndRecreate();
+            } else {
+                loadVideoList();
+            }
+        };
+        
+        testRequest.onerror = function(event) {
+            tryDeleteAndRecreate();
+        };
+    }
+    
+    function tryDeleteAndRecreate() {
+        if (confirm("Error opening database. Do you want to delete and recreate it?")) {
+            const deleteRequest = indexedDB.deleteDatabase("VideoProgressDB");
+            
+            deleteRequest.onsuccess = function() {
+                console.log("Old database deleted");
+                
+                const newRequest = indexedDB.open("VideoProgressDB", 1);
+                
+                newRequest.onupgradeneeded = function(event) {
+                    db = event.target.result;
+                    const store = db.createObjectStore("videos", { keyPath: "id" });
+                    store.createIndex("name", "name", { unique: false });
+                    store.createIndex("path", "path", { unique: false });
+                };
+                
+                newRequest.onsuccess = function(event) {
+                    db = event.target.result;
+                    console.log("Database recreated with version 1");
+                    loadVideoList();
+                };
+                
+                newRequest.onerror = function(event) {
+                    console.error("Cannot recreate database:", event.target.error);
+                    alert("Cannot recreate database. Please reload the page and try again.");
+                };
+            };
+            
+            deleteRequest.onerror = function(event) {
+                console.error("Cannot delete database:", event.target.error);
+                alert("Cannot delete database. Please reload the page and try again.");
+            };
+        } else {
+            alert("The application may not work properly. Please reload the page and try again.");
+        }
+    }
+    
+    openDatabase();
+
+    fileInput.addEventListener("change", function (event) {
+        const files = event.target.files;
+        if (files && files.length > 0) {
+            const file = files[0];
+            handleVideoFile(file);
+        }
+    });
+
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        dropZone.classList.add('active');
+    });
+
+    dropZone.addEventListener('dragleave', function() {
+        dropZone.classList.remove('active');
+    });
+
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        dropZone.classList.remove('active');
+        
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            const file = files[0];
+            if (file.type.includes('video') || file.name.endsWith('.ts')) {
+                handleVideoFile(file);
+            } else {
+                alert('Please select a valid video file (MP4 or TS)');
+            }
+        }
+    });
+
+    function handleVideoFile(file) {
+        const fileId = generateFileId(file);
+        videoFiles[fileId] = file;
+        
+        loadVideo(file);
+        
+        checkExistingVideoProgress(file, fileId);
+        
+        currentVideoName = fileId;
+    }
+
+    function checkExistingVideoProgress(file, fileId) {
+        const transaction = db.transaction(["videos"], "readonly");
+        const store = transaction.objectStore("videos");
+        
+        store.get(fileId).onsuccess = function(event) {
+            const videoInfo = event.target.result;
+            
+            if (videoInfo && videoInfo.time > 0) {
+                console.log(`Video previously watched, time: ${videoInfo.time}`);
+                
+                const setTimeFunction = function() {
+                    if (video.readyState >= 1) {
+                        if (videoInfo.time > 10) {
+                            if (confirm(`You've watched this video to ${formatTime(videoInfo.time)}. Do you want to continue from this position?`)) {
+                                video.currentTime = videoInfo.time;
+                            }
+                        } else {
+                            video.currentTime = 0;
+                        }
+                        video.removeEventListener('loadedmetadata', setTimeFunction);
+                    }
+                };
+                
+                video.addEventListener('loadedmetadata', setTimeFunction);
+            } else {
+                saveVideoInfo(file, fileId);
+            }
+        };
+    }
+
+    function generateFileId(file) {
+        return `${file.name}_${file.size}_${file.lastModified}`;
+    }
+
+    function loadVideo(file) {
+        if (hls) {
+            hls.destroy();
+            hls = null;
+        }
+        
+        if (tsPlayer) {
+            tsPlayer.destroy();
+            tsPlayer = null;
+        }
+
+        const videoURL = URL.createObjectURL(file);
+        console.log("Loading video:", file.name, "URL:", videoURL);
+
+        const fileId = generateFileId(file);
+        videoCache[fileId] = videoURL;
+
+        loadingIndicator.style.display = "block";
+
+        if (file.name.toLowerCase().endsWith(".ts")) {
+            console.log("Detected TS file");
+            
+            try {
+                video.src = videoURL;
+                
+                const playPromise = video.play();
+                
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        console.log("Direct playback successful");
+                        loadingIndicator.style.display = "none";
+                    }).catch(e => {
+                        console.error("Direct playback failed:", e);
+                        
+                        console.log("Trying mpegts.js");
+                        if (typeof mpegts !== 'undefined') {
+                            try {
+                                video.src = '';
+                                
+                                tsPlayer = mpegts.createPlayer({
+                                    type: 'mpegts',
+                                    url: videoURL,
+                                    isLive: false,
+                                    enableWorker: true,
+                                    enableStashBuffer: false,
+                                    stashInitialSize: 128
+                                });
+                                
+                                tsPlayer.attachMediaElement(video);
+                                tsPlayer.load();
+                                
+                                const mpegtsPlayPromise = video.play();
+                                
+                                if (mpegtsPlayPromise !== undefined) {
+                                    mpegtsPlayPromise.then(() => {
+                                        console.log("mpegts.js playback successful");
+                                        loadingIndicator.style.display = "none";
+                                    }).catch(e => {
+                                        console.error("mpegts.js playback failed:", e);
+                                        
+                                        convertTSToPlayableFormat(file);
+                                    });
+                                }
+                            } catch (error) {
+                                console.error("Error initializing mpegts.js player:", error);
+                                convertTSToPlayableFormat(file);
+                            }
+                        } else {
+                            convertTSToPlayableFormat(file);
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error("Error in direct playback:", error);
+                convertTSToPlayableFormat(file);
+            }
+        } else {
+            console.log("Regular video file, using direct playback");
+            video.src = videoURL;
+            video.play().catch(e => {
+                console.error("Play error for regular video:", e);
+                loadingIndicator.style.display = "none";
+            }).finally(() => {
+                loadingIndicator.style.display = "none";
+            });
+        }
+    }
+
+    function convertTSToPlayableFormat(file) {
+        console.log("Converting TS file to playable format");
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const arrayBuffer = e.target.result;
+            
+            const blob = new Blob([arrayBuffer], { type: 'video/mp4' });
+            const blobUrl = URL.createObjectURL(blob);
+            
+            console.log("Created blob URL with MP4 MIME type:", blobUrl);
+            
+            const fileId = generateFileId(file);
+            videoCache[fileId] = blobUrl;
+            
+            video.src = blobUrl;
+            const playPromise = video.play();
+            
+            if (playPromise !== undefined) {
+                playPromise.then(() => {
+                    console.log("Blob URL playback successful");
+                    loadingIndicator.style.display = "none";
+                }).catch(e => {
+                    console.error("Blob URL playback failed:", e);
+                    loadingIndicator.style.display = "none";
+                    
+                    video.src = '';
+                    alert("Cannot play this TS file. The browser does not support this format.");
+                });
+            }
+        };
+        
+        reader.onerror = function() {
+            console.error("Error reading file");
+            loadingIndicator.style.display = "none";
+            alert("Error reading file. Please try again.");
+        };
+        
+        reader.readAsArrayBuffer(file);
+    }
+
+    video.addEventListener("timeupdate", function () {
+        if (video.src && currentVideoName) {
+            updateVideoProgress(currentVideoName, video.currentTime);
+        }
+    });
+
+    video.addEventListener("ended", function () {
+        if (currentVideoName) {
+            updateVideoProgress(currentVideoName, 0);
+        }
+    });
+
+    function saveVideoInfo(file, fileId) {
+        const transaction = db.transaction(["videos"], "readwrite");
+        const store = transaction.objectStore("videos");
+        
+        let filePath = '';
+        if (file.webkitRelativePath) {
+            filePath = file.webkitRelativePath.split('/').slice(0, -1).join('/');
+        }
+        
+        const videoInfo = {
+            id: fileId,
+            name: file.name,
+            path: filePath,
+            type: file.type || (file.name.toLowerCase().endsWith('.ts') ? 'video/mp2t' : 'video/mp4'),
+            size: file.size,
+            lastModified: file.lastModified,
+            time: 0,
+            duration: 0,
+            addedAt: new Date().getTime()
+        };
+        
+        store.get(fileId).onsuccess = function(event) {
+            const existingVideo = event.target.result;
+            if (existingVideo) {
+                videoInfo.time = existingVideo.time;
+                videoInfo.duration = existingVideo.duration;
+            }
+            
+            store.put(videoInfo);
+            
+            transaction.oncomplete = function() {
+                loadVideoList();
+            };
+        };
+    }
+
+    function updateVideoProgress(fileId, time) {
+        const transaction = db.transaction(["videos"], "readwrite");
+        const store = transaction.objectStore("videos");
+        
+        store.get(fileId).onsuccess = function(event) {
+            const videoInfo = event.target.result;
+            if (videoInfo) {
+                videoInfo.time = time;
+                
+                if (videoInfo.duration === 0 && video.duration) {
+                    videoInfo.duration = video.duration;
+                }
+                
+                store.put(videoInfo);
+                
+                if (time % 5 < 0.5) {
+                    loadVideoList();
+                }
+            }
+        };
+    }
+
+    function loadVideoList() {
+        videoList.innerHTML = "";
+        const transaction = db.transaction(["videos"], "readonly");
+        const store = transaction.objectStore("videos");
+        
+        let videos = [];
+        
+        store.openCursor().onsuccess = function (event) {
+            const cursor = event.target.result;
+            if (cursor) {
+                videos.push(cursor.value);
+                cursor.continue();
+            } else {
+                videos.sort((a, b) => b.addedAt - a.addedAt);
+                
+                videos.forEach(videoInfo => {
+                    const li = document.createElement("li");
+                    li.classList.add("list-group-item", "d-flex", "justify-content-between", "align-items-center");
+                    
+                    const infoDiv = document.createElement("div");
+                    infoDiv.classList.add("video-info");
+                    
+                    const nameSpan = document.createElement("span");
+                    nameSpan.textContent = videoInfo.name;
+                    nameSpan.classList.add("video-name");
+                    infoDiv.appendChild(nameSpan);
+                    
+                    if (videoInfo.path) {
+                        const pathSpan = document.createElement("span");
+                        pathSpan.textContent = videoInfo.path;
+                        pathSpan.classList.add("video-path");
+                        infoDiv.appendChild(pathSpan);
+                    }
+                    
+                    li.appendChild(infoDiv);
+                    
+                    if (videoInfo.time > 0) {
+                        const timeSpan = document.createElement("span");
+                        if (videoInfo.duration > 0) {
+                            timeSpan.textContent = `${formatTime(videoInfo.time)} / ${formatTime(videoInfo.duration)}`;
+                        } else {
+                            timeSpan.textContent = formatTime(videoInfo.time);
+                        }
+                        timeSpan.classList.add("badge", "bg-primary", "mx-2");
+                        li.appendChild(timeSpan);
+                    }
+                    
+                    const deleteBtn = document.createElement("button");
+                    deleteBtn.textContent = "X";
+                    deleteBtn.classList.add("btn", "btn-sm", "btn-outline-danger");
+                    deleteBtn.onclick = function (e) {
+                        e.stopPropagation();
+                        deleteVideo(videoInfo.id);
+                    };
+                    
+                    li.appendChild(deleteBtn);
+                    li.onclick = function () {
+                        playVideoFromList(videoInfo);
+                    };
+                    
+                    videoList.appendChild(li);
+                });
+            }
+        };
+    }
+    
+    function formatTime(seconds) {
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = Math.floor(seconds % 60);
+        return `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingSeconds}`;
+    }
+
+    function playVideoFromList(videoInfo) {
+        if (videoFiles[videoInfo.id]) {
+            console.log("Playing video from file cache:", videoInfo.name);
+            const file = videoFiles[videoInfo.id];
+            loadVideo(file);
+            currentVideoName = videoInfo.id;
+            
+            const setTimeFunction = function() {
+                if (video.readyState >= 1) {
+                    video.currentTime = videoInfo.time;
+                    video.removeEventListener('loadedmetadata', setTimeFunction);
+                }
+            };
+            
+            video.addEventListener('loadedmetadata', setTimeFunction);
+            return;
+        }
+        
+        promptForVideoFile(videoInfo);
+    }
+
+    function promptForVideoFile(videoInfo) {
+        const tempFileInput = document.createElement('input');
+        tempFileInput.type = 'file';
+        tempFileInput.accept = 'video/mp4,video/x-mpegts,video/mp2t,.ts,.mp4';
+        
+        tempFileInput.onchange = function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                if (file.name === videoInfo.name) {
+                    videoFiles[videoInfo.id] = file;
+                    
+                    loadVideo(file);
+                    currentVideoName = videoInfo.id;
+                    
+                    const setTimeFunction = function() {
+                        if (video.readyState >= 1) {
+                            video.currentTime = videoInfo.time;
+                            video.removeEventListener('loadedmetadata', setTimeFunction);
+                        }
+                    };
+                    
+                    video.addEventListener('loadedmetadata', setTimeFunction);
+                    
+                    try {
+                        const dataTransfer = new DataTransfer();
+                        dataTransfer.items.add(file);
+                        fileInput.files = dataTransfer.files;
+                    } catch (err) {
+                        console.error("Cannot update fileInput:", err);
+                    }
+                } else {
+                    if (confirm(`The file you selected (${file.name}) is different from the file in the list (${videoInfo.name}). Do you want to play this file instead?`)) {
+                        handleVideoFile(file);
+                    }
+                }
+            }
+        };
+        
+        alert(`Please select the file "${videoInfo.name}" to continue playing from ${formatTime(videoInfo.time)}`);
+        
+        tempFileInput.click();
+    }
+
+    function deleteVideo(id) {
+        const transaction = db.transaction(["videos"], "readwrite");
+        const store = transaction.objectStore("videos");
+        store.delete(id).onsuccess = function () {
+            if (videoCache[id]) {
+                URL.revokeObjectURL(videoCache[id]);
+                delete videoCache[id];
+            }
+            
+            if (videoFiles[id]) {
+                delete videoFiles[id];
+            }
+            
+            loadVideoList();
+        };
+    }
+
+    clearListBtn.addEventListener("click", function () {
+        if (confirm("Are you sure you want to delete all videos from the list?")) {
+            if (db) {
+                const transaction = db.transaction(["videos"], "readwrite");
+                const store = transaction.objectStore("videos");
+                store.clear().onsuccess = function () {
+                    for (const id in videoCache) {
+                        URL.revokeObjectURL(videoCache[id]);
+                    }
+                    videoCache = {};
+                    videoFiles = {};
+                    videoList.innerHTML = "";
+                };
+            } else {
+                console.error("Database not open");
+                alert("Cannot clear list. Please reload the page and try again.");
+            }
+        }
+    });
+    
+    window.addEventListener('beforeunload', function() {
+        if (video.src && currentVideoName) {
+            updateVideoProgress(currentVideoName, video.currentTime);
+        }
+    });
+});
+
+</script>
