@@ -72,7 +72,7 @@
 
     <div class="drop-zone mt-3" id="dropZone">
         <p>Drop video here</p>
-        <input type="file" id="fileInput" accept="video/mp4,video/x-mpegts,video/mp2t,.ts,.mp4" class="form-control w-50 mx-auto">
+        <input type="file" id="fileInput" accept="video/mp4,.mp4" class="form-control w-50 mx-auto">
     </div>
 
     <div class="loading-indicator" id="loadingIndicator">
@@ -96,9 +96,6 @@
         <ul id="videoList" class="list-group mt-2"></ul>
     </div>
 
-<!-- Libraries for TS file processing -->
-<script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest"></script>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </body>
 </html>
 <script>
@@ -112,8 +109,6 @@
     
     let db;
     let currentVideoName = null;
-    let hls = null;
-    let tsPlayer = null;
     let videoCache = {};
     let videoFiles = {};
 
@@ -231,10 +226,10 @@
         const files = e.dataTransfer.files;
         if (files.length > 0) {
             const file = files[0];
-            if (file.type.includes('video') || file.name.endsWith('.ts')) {
+            if (file.type.includes('video/mp4') || file.name.endsWith('.mp4')) {
                 handleVideoFile(file);
             } else {
-                alert('Please select a valid video file (MP4 or TS)');
+                alert('Please select a valid MP4 video file');
             }
         }
     });
@@ -285,16 +280,6 @@
     }
 
     function loadVideo(file) {
-        if (hls) {
-            hls.destroy();
-            hls = null;
-        }
-        
-        if (tsPlayer) {
-            tsPlayer.destroy();
-            tsPlayer = null;
-        }
-
         const videoURL = URL.createObjectURL(file);
         console.log("Loading video:", file.name, "URL:", videoURL);
 
@@ -303,114 +288,14 @@
 
         loadingIndicator.style.display = "block";
 
-        if (file.name.toLowerCase().endsWith(".ts")) {
-            console.log("Detected TS file");
-            
-            try {
-                video.src = videoURL;
-                
-                const playPromise = video.play();
-                
-                if (playPromise !== undefined) {
-                    playPromise.then(() => {
-                        console.log("Direct playback successful");
-                        loadingIndicator.style.display = "none";
-                    }).catch(e => {
-                        console.error("Direct playback failed:", e);
-                        
-                        console.log("Trying mpegts.js");
-                        if (typeof mpegts !== 'undefined') {
-                            try {
-                                video.src = '';
-                                
-                                tsPlayer = mpegts.createPlayer({
-                                    type: 'mpegts',
-                                    url: videoURL,
-                                    isLive: false,
-                                    enableWorker: true,
-                                    enableStashBuffer: false,
-                                    stashInitialSize: 128
-                                });
-                                
-                                tsPlayer.attachMediaElement(video);
-                                tsPlayer.load();
-                                
-                                const mpegtsPlayPromise = video.play();
-                                
-                                if (mpegtsPlayPromise !== undefined) {
-                                    mpegtsPlayPromise.then(() => {
-                                        console.log("mpegts.js playback successful");
-                                        loadingIndicator.style.display = "none";
-                                    }).catch(e => {
-                                        console.error("mpegts.js playback failed:", e);
-                                        
-                                        convertTSToPlayableFormat(file);
-                                    });
-                                }
-                            } catch (error) {
-                                console.error("Error initializing mpegts.js player:", error);
-                                convertTSToPlayableFormat(file);
-                            }
-                        } else {
-                            convertTSToPlayableFormat(file);
-                        }
-                    });
-                }
-            } catch (error) {
-                console.error("Error in direct playback:", error);
-                convertTSToPlayableFormat(file);
-            }
-        } else {
-            console.log("Regular video file, using direct playback");
-            video.src = videoURL;
-            video.play().catch(e => {
-                console.error("Play error for regular video:", e);
-                loadingIndicator.style.display = "none";
-            }).finally(() => {
+        video.src = videoURL;
+        video.play()
+            .catch(e => {
+                console.error("Play error:", e);
+            })
+            .finally(() => {
                 loadingIndicator.style.display = "none";
             });
-        }
-    }
-
-    function convertTSToPlayableFormat(file) {
-        console.log("Converting TS file to playable format");
-        
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const arrayBuffer = e.target.result;
-            
-            const blob = new Blob([arrayBuffer], { type: 'video/mp4' });
-            const blobUrl = URL.createObjectURL(blob);
-            
-            console.log("Created blob URL with MP4 MIME type:", blobUrl);
-            
-            const fileId = generateFileId(file);
-            videoCache[fileId] = blobUrl;
-            
-            video.src = blobUrl;
-            const playPromise = video.play();
-            
-            if (playPromise !== undefined) {
-                playPromise.then(() => {
-                    console.log("Blob URL playback successful");
-                    loadingIndicator.style.display = "none";
-                }).catch(e => {
-                    console.error("Blob URL playback failed:", e);
-                    loadingIndicator.style.display = "none";
-                    
-                    video.src = '';
-                    alert("Cannot play this TS file. The browser does not support this format.");
-                });
-            }
-        };
-        
-        reader.onerror = function() {
-            console.error("Error reading file");
-            loadingIndicator.style.display = "none";
-            alert("Error reading file. Please try again.");
-        };
-        
-        reader.readAsArrayBuffer(file);
     }
 
     video.addEventListener("timeupdate", function () {
@@ -438,7 +323,7 @@
             id: fileId,
             name: file.name,
             path: filePath,
-            type: file.type || (file.name.toLowerCase().endsWith('.ts') ? 'video/mp2t' : 'video/mp4'),
+            type: file.type || 'video/mp4',
             size: file.size,
             lastModified: file.lastModified,
             time: 0,
@@ -579,7 +464,7 @@
     function promptForVideoFile(videoInfo) {
         const tempFileInput = document.createElement('input');
         tempFileInput.type = 'file';
-        tempFileInput.accept = 'video/mp4,video/x-mpegts,video/mp2t,.ts,.mp4';
+        tempFileInput.accept = 'video/mp4,.mp4';
         
         tempFileInput.onchange = function(e) {
             const file = e.target.files[0];
@@ -662,5 +547,4 @@
         }
     });
 });
-
 </script>
